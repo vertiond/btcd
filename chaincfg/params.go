@@ -8,13 +8,18 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"io"
 	"math"
 	"math/big"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/chaincfg/difficulty"
 	"github.com/btcsuite/btcd/wire"
+
+    "github.com/bitgoin/lyra2rev2"
 )
 
 // These variables are the chain proof-of-work limit parameters for each default
@@ -157,6 +162,12 @@ type Params struct {
 	// GenesisHash is the starting block hash.
 	GenesisHash *chainhash.Hash
 
+	// The function used to calculate the proof of work value for a block
+	PoWFunction func(b []byte) chainhash.Hash
+
+    // The function used to calculate the difficulty of a given block
+    DiffCalcFunction func(r io.ReadSeeker, height, startheight int32, p *Params) (uint32, error)
+
 	// PowLimit defines the highest allowed proof of work value for a block
 	// as a uint256.
 	PowLimit *big.Int
@@ -252,6 +263,313 @@ type Params struct {
 	HDCoinType uint32
 }
 
+/* calcDiff returns a bool given two block headers.  This bool is
+true if the correct dificulty adjustment is seen in the "next" header.
+Only feed it headers n-2016 and n-1, otherwise it will calculate a difficulty
+when no adjustment should take place, and return false.
+Note that the epoch is actually 2015 blocks long, which is confusing. */
+func calcDiffAdjustBitcoin(start, end wire.BlockHeader, p *Params) uint32 {
+	minRetargetTimespan := int64(p.TargetTimespan.Seconds()) / p.RetargetAdjustmentFactor
+	maxRetargetTimespan := int64(p.TargetTimespan.Seconds()) * p.RetargetAdjustmentFactor
+	duration := end.Timestamp.UnixNano() - start.Timestamp.UnixNano()
+	if duration < minRetargetTimespan {
+		duration = minRetargetTimespan
+	} else if duration > maxRetargetTimespan {
+		duration = maxRetargetTimespan
+	}
+
+	// calculation of new 32-byte difficulty target
+	// first turn the previous target into a big int
+	prevTarget := difficulty.CompactToBig(start.Bits)
+	// new target is old * duration...
+	newTarget := new(big.Int).Mul(prevTarget, big.NewInt(duration))
+	// divided by 2 weeks
+	newTarget.Div(newTarget, big.NewInt(int64(p.TargetTimespan / time.Second)))
+
+  powLimit := difficulty.CompactToBig(p.PowLimitBits)
+
+	// clip again if above minimum target (too easy)
+	if newTarget.Cmp(powLimit) > 0 {
+		newTarget.Set(powLimit)
+	}
+
+	// calculate and return 4-byte 'bits' difficulty from 32-byte target
+	return difficulty.BigToCompact(newTarget)
+}
+
+func BTCDiff (r io.ReadSeeker, height, startheight int32, p *Params) (uint32, error) {
+  epochLength := int32(p.TargetTimespan / p.TargetTimePerBlock)
+  var err error
+  var cur, prev, epochStart wire.BlockHeader
+
+  offsetHeight := height - startheight
+
+  // seek to n-1 header
+  _, err = r.Seek(int64(80*(offsetHeight-1)), os.SEEK_SET)
+  if err != nil {
+    return 0, err
+  }
+  // read in n-1
+  err = prev.Deserialize(r)
+  if err != nil {
+    return 0, err
+  }
+
+    // seek to curHeight header and read in
+  _, err = r.Seek(int64(80*(offsetHeight)), os.SEEK_SET)
+  if err != nil {
+    return 0, err
+  }
+  err = cur.Deserialize(r)
+  if err != nil {
+    return 0, err
+  }
+
+  _, err = r.Seek(int64(80*(offsetHeight-(height%epochLength))), os.SEEK_SET)
+  if err != nil {
+    return 0, err
+  }
+  err = epochStart.Deserialize(r)
+  if err != nil {
+    return 0, err
+  }
+
+  var rightBits uint32
+
+  if (height)%epochLength == 0 {
+    // if so, check if difficulty adjustment is valid.
+    // That whole "controlled supply" thing.
+    // calculate diff n based on n-2016 ... n-1
+    rightBits = calcDiffAdjustBitcoin(epochStart, prev, p)
+  } else { // not a new epoch
+    rightBits = epochStart.Bits
+
+    // if on testnet, check for difficulty nerfing
+    if p.ReduceMinDifficulty && cur.Timestamp.After(
+      prev.Timestamp.Add(p.TargetTimePerBlock*2)) {
+      rightBits = p.PowLimitBits // difficulty 1
+    }
+  }
+
+  return rightBits, nil
+}
+
+func LTCDiff (r io.ReadSeeker, height, startheight int32, p *Params) (uint32, error) {
+  epochLength := int32(p.TargetTimespan / p.TargetTimePerBlock)
+  var err error
+  var cur, prev, epochStart wire.BlockHeader
+
+  offsetHeight := height - startheight
+
+  // seek to n-1 header
+  _, err = r.Seek(int64(80*(offsetHeight-1)), os.SEEK_SET)
+  if err != nil {
+    return 0, err
+  }
+  // read in n-1
+  err = prev.Deserialize(r)
+  if err != nil {
+    return 0, err
+  }
+
+    // seek to curHeight header and read in
+  _, err = r.Seek(int64(80*(offsetHeight)), os.SEEK_SET)
+  if err != nil {
+    return 0, err
+  }
+  err = cur.Deserialize(r)
+  if err != nil {
+    return 0, err
+  }
+
+  _, err = r.Seek(int64(80*(offsetHeight-(height%epochLength))), os.SEEK_SET)
+  if err != nil {
+    return 0, err
+  }
+  err = epochStart.Deserialize(r)
+  if err != nil {
+    return 0, err
+  }
+
+  var rightBits uint32
+
+  if (height)%epochLength == 0 {
+    // if so, check if difficulty adjustment is valid.
+    // That whole "controlled supply" thing.
+    // calculate diff n based on n-2016 ... n-1
+
+    // In Litecoin the first epoch recalculates 2015 blocks back
+    if height == epochLength {
+      _, err = r.Seek(int64(0), os.SEEK_SET)
+      if err != nil {
+        return 0, err
+      }
+    } else {
+      _, err = r.Seek(int64(offsetHeight - epochLength), os.SEEK_SET)
+      if err != nil {
+        return 0, err
+      }
+    }
+
+    err = epochStart.Deserialize(r)
+    if err != nil {
+      return 0, err
+    }
+
+    rightBits = calcDiffAdjustBitcoin(epochStart, prev, p)
+  } else { // not a new epoch
+    rightBits = epochStart.Bits
+
+    // if on testnet, check for difficulty nerfing
+    if p.ReduceMinDifficulty && cur.Timestamp.After(
+      prev.Timestamp.Add(p.TargetTimePerBlock*2)) {
+      rightBits = p.PowLimitBits // difficulty 1
+    }
+  }
+
+  return rightBits, nil
+}
+
+// Uses Kimoto Gravity Well for difficulty adjustment. Used in VTC, MONA etc
+func calcDiffAdjustKGW(r io.ReadSeeker, height, startheight int32, p *Params) (uint32, error) {
+  var minBlocks, maxBlocks int32
+  minBlocks = 144
+  maxBlocks = 4032
+
+  if height - 1 < minBlocks {
+    return p.PowLimitBits, nil
+  }
+
+  offsetHeight := height - startheight - 1
+
+  var currentBlock wire.BlockHeader
+  var err error
+
+  // seek to n-1 header
+  _, err = r.Seek(int64(80*offsetHeight), os.SEEK_SET)
+  if err != nil {
+    return 0, err
+  }
+  // read in n-1
+  err = currentBlock.Deserialize(r)
+  if err != nil {
+    return 0, err
+  }
+
+  lastSolved := currentBlock
+
+  var blocksScanned, actualRate, targetRate int64
+  var difficultyAverage, previousDifficultyAverage big.Int
+  var rateAdjustmentRatio, eventHorizonDeviation, eventHorizonDeviationFast, eventHorizonDevationSlow float64
+  rateAdjustmentRatio = 1
+
+  currentHeight := height - 1
+
+  var i int32
+
+  for i = 1; currentHeight != 1; i++ {
+    if i > maxBlocks {
+      break
+    }
+
+    blocksScanned++
+
+    if i == 1 {
+      difficultyAverage = *difficulty.CompactToBig(currentBlock.Bits)
+    } else {
+      compact := difficulty.CompactToBig(currentBlock.Bits)
+
+      difference  := new(big.Int).Sub(compact, &previousDifficultyAverage)
+      difference.Div(difference, big.NewInt(int64(i)))
+      difference.Add(difference, &previousDifficultyAverage)
+      difficultyAverage = *difference
+    }
+
+    previousDifficultyAverage = difficultyAverage
+
+    actualRate = lastSolved.Timestamp.Unix() - currentBlock.Timestamp.Unix()
+    targetRate = int64(p.TargetTimePerBlock.Seconds()) * blocksScanned
+    rateAdjustmentRatio = 1
+
+    if actualRate < 0 {
+      actualRate = 0
+    }
+
+    if actualRate != 0 && targetRate != 0 {
+      rateAdjustmentRatio = float64(targetRate) / float64(actualRate)
+    }
+
+    eventHorizonDeviation = 1 + (0.7084 * math.Pow(float64(blocksScanned)/float64(minBlocks), -1.228))
+    eventHorizonDeviationFast = eventHorizonDeviation
+    eventHorizonDevationSlow = 1 / eventHorizonDeviation
+
+    if blocksScanned >= int64(minBlocks) && (rateAdjustmentRatio <= eventHorizonDevationSlow || rateAdjustmentRatio >= eventHorizonDeviationFast) {
+      break
+    }
+
+    if currentHeight < 1 {
+      break
+    }
+
+    currentHeight--
+
+    _, err = r.Seek(int64(80*(currentHeight - startheight)), os.SEEK_SET)
+    if err != nil {
+      return 0, err
+    }
+    // read in n-1
+    err = currentBlock.Deserialize(r)
+    if err != nil {
+      return 0, err
+    }
+  }
+
+  newTarget := difficultyAverage
+  if actualRate != 0 && targetRate != 0 {
+    newTarget.Mul(&newTarget, big.NewInt(actualRate))
+
+    newTarget.Div(&newTarget, big.NewInt(targetRate))
+  }
+
+  if newTarget.Cmp(p.PowLimit) == 1 {
+    newTarget = *p.PowLimit
+  }
+
+  return difficulty.BigToCompact(&newTarget), nil
+}
+
+func VTCTestDiff (r io.ReadSeeker, height, startheight int32, p *Params) (uint32, error) {
+  if height < 2116 {
+      return LTCDiff(r, height, startheight, p)
+  }
+
+  offsetHeight := height - startheight
+
+  // Testnet retargets only every 12 blocks
+  if height % 12 != 0 {
+      var prev wire.BlockHeader
+      var err error
+
+      // seek to n-1 header
+      _, err = r.Seek(int64(80*(offsetHeight-1)), os.SEEK_SET)
+      if err != nil {
+        return 0, err
+      }
+      // read in n-1
+      err = prev.Deserialize(r)
+      if err != nil {
+        return 0, err
+      }
+
+      return prev.Bits, nil
+  }
+
+  // Run KGW
+  return calcDiffAdjustKGW(r, height, startheight, p)
+}
+
+
+
 // MainNetParams defines the network parameters for the main Bitcoin network.
 var MainNetParams = Params{
 	Name:        "mainnet",
@@ -274,8 +592,8 @@ var MainNetParams = Params{
 	BIP0066Height:            691488, // 1d0446fe48fdebf4780f544f1de81c2527099da2d09465873475cefe96ab84a1
 	CoinbaseMaturity:         100,
 	SubsidyReductionInterval: 840000,
-	TargetTimespan:           time.Hour * 24 * 3.5, // 14 days
-	TargetTimePerBlock:       time.Minute * 2.5,    // 10 minutes
+	TargetTimespan:           time.Hour * 24 * 3.5, // 3.5 days
+	TargetTimePerBlock:       time.Minute * 2.5,    // 2.5 minutes
 	RetargetAdjustmentFactor: 4,                   // 25% less, 400% more
 	ReduceMinDifficulty:      false,
 	MinDiffReductionTime:     0,
@@ -441,17 +759,23 @@ var TestNet3Params = Params{
 	},
 
 	// Chain parameters
+    DiffCalcFunction:         VTCTestDiff,
 	GenesisBlock:             &testNet3GenesisBlock,
 	GenesisHash:              &testNet3GenesisHash,
 	PowLimit:                 testNet3PowLimit,
+    PoWFunction:              func(b []byte) chainhash.Hash {
+                              lyraBytes, _ := lyra2rev2.Sum(b)
+                              asChainHash, _ := chainhash.NewHash(lyraBytes)
+                              return *asChainHash
+                            },
 	PowLimitBits:             0x1e0fffff,
 	BIP0034Height:            300,  // d6be7cfec4fb1d6a8a94f0a423520a78c97fbdc766cd25f9512adc9249282c2a
 	BIP0065Height:            300,  // d6be7cfec4fb1d6a8a94f0a423520a78c97fbdc766cd25f9512adc9249282c2a
 	BIP0066Height:            300,  // d6be7cfec4fb1d6a8a94f0a423520a78c97fbdc766cd25f9512adc9249282c2a
 	CoinbaseMaturity:         100,
 	SubsidyReductionInterval: 840000,
-	TargetTimespan:           time.Hour * 24 * 14, // 14 days
-	TargetTimePerBlock:       time.Minute * 2.5,    // 10 minutes
+	TargetTimespan:           time.Hour * 24 * 3.5, // 3.5 days
+	TargetTimePerBlock:       time.Minute * 2.5,    // 2.5 minutes
 	RetargetAdjustmentFactor: 4,                   // 25% less, 400% more
 	ReduceMinDifficulty:      true,
 
