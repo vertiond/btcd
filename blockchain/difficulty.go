@@ -218,7 +218,7 @@ func (b *BlockChain) findPrevTestNetDifficulty(startNode *blockNode) uint32 {
 // This function differs from the exported CalcNextRequiredDifficulty in that
 // the exported version uses the current best chain as the previous block node
 // while this function accepts any block node.
-func (b *BlockChain) calcNextRequiredDifficulty(lastNode *blockNode, newBlockTime time.Time) (uint32, error) {
+func (b *BlockChain) calcNextRequiredDifficulty_Bitcoin(lastNode *blockNode, newBlockTime time.Time) (uint32, error) {
 	// Genesis block.
 	if lastNode == nil {
 		return b.chainParams.PowLimitBits, nil
@@ -251,9 +251,17 @@ func (b *BlockChain) calcNextRequiredDifficulty(lastNode *blockNode, newBlockTim
 		return lastNode.bits, nil
 	}
 
+	// Litecoin fixes an issue where a 51% can change the difficult at
+	// will. We only go back the full period unless it's the first retarget
+	// after genesis.
+	blocksPerRetarget := b.blocksPerRetarget - 1
+	if lastNode.height+1 != b.blocksPerRetarget {
+		blocksPerRetarget = b.blocksPerRetarget
+	}
+
 	// Get the block node at the previous retarget (targetTimespan days
 	// worth of blocks).
-	firstNode := lastNode.RelativeAncestor(b.blocksPerRetarget - 1)
+	firstNode := lastNode.RelativeAncestor(blocksPerRetarget)
 	if firstNode == nil {
 		return 0, AssertError("unable to obtain previous retarget block")
 	}

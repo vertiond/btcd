@@ -121,9 +121,9 @@ func normalizeAddress(addr string, chain *chaincfg.Params, useWallet bool) (stri
 		switch chain {
 		case &chaincfg.TestNet3Params:
 			if useWallet {
-				defaultPort = "18332"
+				defaultPort = "15888"
 			} else {
-				defaultPort = "18334"
+				defaultPort = "15890"
 			}
 		case &chaincfg.SimNetParams:
 			if useWallet {
@@ -147,9 +147,9 @@ func normalizeAddress(addr string, chain *chaincfg.Params, useWallet bool) (stri
 			}
 		default:
 			if useWallet {
-				defaultPort = "8332"
+				defaultPort = "5888"
 			} else {
-				defaultPort = "8334"
+				defaultPort = "5890"
 			}
 		}
 

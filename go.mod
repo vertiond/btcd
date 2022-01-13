@@ -16,7 +16,10 @@ require (
 
 require (
 	github.com/aead/siphash v1.0.1 // indirect
+	github.com/aead/skein v0.0.0-20160722084837-9365ae6e95d2 // indirect
+	github.com/bitgoin/lyra2rev2 v0.0.0-20161212102046-bae9ad2043bb // indirect
 	github.com/btcsuite/snappy-go v1.0.0 // indirect
+	github.com/dchest/blake256 v1.1.0 // indirect
 	github.com/kkdai/bstream v0.0.0-20161212061736-f391b8402d23 // indirect
 )
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+    "github.com/bitgoin/lyra2rev2"
 )
 
 // MaxBlockHeaderPayload is the maximum number of bytes a block header can be.
@@ -54,6 +55,20 @@ func (h *BlockHeader) BlockHash() chainhash.Hash {
 	_ = writeBlockHeader(buf, 0, h)
 
 	return chainhash.DoubleHashH(buf.Bytes())
+}
+
+// PowHash returns the litecoin scrypt hash of this block header. This value is
+// used to check the PoW on blocks advertised on the network.
+func (h *BlockHeader) PowHash() chainhash.Hash {
+	var powHash chainhash.Hash
+
+	buf := bytes.NewBuffer(make([]byte, 0, MaxBlockHeaderPayload))
+	_ = writeBlockHeader(buf, 0, h)
+
+	lyra2rev2Hash, _ := lyra2rev2.Sum(buf.Bytes())
+	copy(powHash[:], lyra2rev2Hash)
+
+	return powHash
 }
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
